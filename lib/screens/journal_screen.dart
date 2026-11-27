@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import '../models/entry.dart';
 import '../services/database_service.dart';
 import '../services/image_service.dart';
+import '../utils/entry_link.dart';
 
 class JournalScreen extends StatefulWidget {
   const JournalScreen({super.key});
@@ -188,22 +189,73 @@ class _JournalScreenState extends State<JournalScreen> with WidgetsBindingObserv
     await _loadEntry();
   }
 
+  Future<void> _navigateToDate(String date) async {
+    if (date == _currentDate) return;
+    // Entries can't exist in the future
+    if (date.compareTo(_today) > 0) return;
+
+    await _saveCurrentEntry();
+    setState(() => _currentDate = date);
+    await _loadEntry();
+  }
+
+  void _onMarkdownLinkTap(String text, String? href, String title) {
+    final date = EntryLink.parseDate(href);
+    if (date != null) {
+      _navigateToDate(date);
+    }
+  }
+
+  /// Inserts [snippet] at the cursor (or end of text), surrounded by
+  /// [padding], and places the cursor after it.
+  void _insertAtCursor(String snippet, {String padding = ''}) {
+    final cursorPos = _controller.selection.baseOffset;
+    final text = _controller.text;
+    final insert = '$padding$snippet$padding';
+
+    final newText = cursorPos >= 0
+        ? '${text.substring(0, cursorPos)}$insert${text.substring(cursorPos)}'
+        : '$text$insert';
+
+    _controller.text = newText;
+    _controller.selection = TextSelection.collapsed(
+      offset: cursorPos >= 0 ? cursorPos + insert.length : newText.length,
+    );
+  }
+
   Future<void> _addImage() async {
     final imagePath = await _imageService.pickAndSaveImage(_currentDate);
     if (imagePath == null) return;
 
-    final markdownLink = _imageService.getMarkdownImageLink(imagePath);
-    final cursorPos = _controller.selection.baseOffset;
-    final text = _controller.text;
+    _insertAtCursor(_imageService.getMarkdownImageLink(imagePath), padding: '\n');
+  }
 
-    final newText = cursorPos >= 0
-        ? '${text.substring(0, cursorPos)}\n$markdownLink\n${text.substring(cursorPos)}'
-        : '$text\n$markdownLink\n';
+  Future<void> _addEntryLink() async {
+    final dates = (await _db.getEntryDates())
+        .where((d) => d.compareTo(_currentDate) < 0)
+        .toList(); // newest first
+    if (!mounted) return;
 
-    _controller.text = newText;
-    _controller.selection = TextSelection.collapsed(
-      offset: cursorPos >= 0 ? cursorPos + markdownLink.length + 2 : newText.length,
+    if (dates.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('There are no earlier entries to link to.')),
+      );
+      return;
+    }
+
+    final available = dates.toSet();
+    final picked = await showDatePicker(
+      context: context,
+      helpText: 'Link to an earlier entry',
+      initialDate: DateTime.parse(dates.first),
+      firstDate: DateTime.parse(dates.last),
+      lastDate: DateTime.parse(dates.first),
+      selectableDayPredicate: (day) => available.contains(_formatDate(day)),
     );
+    if (picked == null) return;
+
+    _insertAtCursor(EntryLink.markdownFor(_formatDate(picked)));
+    _focusNode.requestFocus();
   }
 
   @override
@@ -214,9 +266,9 @@ class _JournalScreenState extends State<JournalScreen> with WidgetsBindingObserv
         title: Text(_formatDisplayDate(_currentDate)),
         actions: [
           if (_isToday)
-            IconButton(
+            TextButton.icon(
               icon: Icon(_showPreview ? Icons.edit : Icons.preview),
-              tooltip: _showPreview ? 'Edit' : 'Preview',
+              label: Text(_showPreview ? 'Edit' : 'Preview'),
               onPressed: () => setState(() => _showPreview = !_showPreview),
             ),
           if (!_isToday)
@@ -324,6 +376,12 @@ class _JournalScreenState extends State<JournalScreen> with WidgetsBindingObserv
                 icon: const Icon(Icons.image),
                 label: const Text('Add Image'),
               ),
+              const SizedBox(width: 8),
+              ElevatedButton.icon(
+                onPressed: _addEntryLink,
+                icon: const Icon(Icons.link),
+                label: const Text('Link Entry'),
+              ),
             ],
           ),
         ],
@@ -347,6 +405,7 @@ class _JournalScreenState extends State<JournalScreen> with WidgetsBindingObserv
     return Markdown(
       data: content,
       selectable: true,
+      onTapLink: _onMarkdownLinkTap,
       imageBuilder: (uri, title, alt) {
         final file = File(uri.toFilePath());
         if (file.existsSync()) {
